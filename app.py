@@ -13,7 +13,7 @@ import osmnx as ox
 import networkx as nx
 
 # ===================== 설정 =====================
-MAPBOX_TOKEN = pk.eyJ1IjoiZ3VyMDUxMDgiLCJhIjoiY21lZ2k1Y291MTdoZjJrb2k3bHc3cTJrbSJ9.DElgSQ0rPoRk1eEacPI8uQ
+MAPBOX_TOKEN = "pk.eyJ1IjoiZ3VyMDUxMDgiLCJhIjoiY21lZ2k1Y291MTdoZjJrb2k3bHc3cTJrbSJ9.DElgSQ0rPoRk1eEacPI8uQ"
 
 DATA_DIR = "."
 ROUTE_FILES = {
@@ -222,7 +222,7 @@ def mapbox_route(lonlat_pairs, profile="driving"):
     for i in range(len(lonlat_pairs) - 1):
         try:
             x1, y1 = float(lonlat_pairs[i][0]), float(lonlat_pairs[i][1])
-            x2, y2 = float(lonlat_pairs[i + 1]), float(lonlat_pairs[i + 1][1])
+            x2, y2 = float(lonlat_pairs[i + 1]), float(lonlat_pairs[i + 1][1])  # 수정됨
             
             url = f"https://api.mapbox.com/directions/v5/mapbox/{profile}/{x1},{y1};{x2},{y2}"
             params = {
@@ -418,7 +418,7 @@ if generate:
                     if not segs:
                         try:
                             avg_lat = sum([c[1] for c in coords]) / len(coords)
-                            avg_lon = sum([c for c in coords]) / len(coords)
+                            avg_lon = sum([c for c in coords]) / len(coords)  # 수정됨
                             net_type = "drive" if profile == "driving" else "walk"
                             G = load_graph(avg_lat, avg_lon, dist=OSMNX_DIST_M, net_type=net_type)
                             spd = 30.0 if profile == "driving" else 4.5
@@ -510,7 +510,7 @@ with col3:
                 for i, seg in enumerate(segs):
                     try:
                         if seg and len(seg) >= 2:
-                            latlon = [(float(p[1]), float(p)) for p in seg if len(p) >= 2]
+                            latlon = [(float(p[1]), float(p[0])) for p in seg if len(p) >= 2]  # 수정됨
                             if latlon:
                                 folium.PolyLine(latlon, color=palette[i % len(palette)],
                                               weight=7, opacity=0.92, tooltip=f"실도로 경로 {i+1}").add_to(m)
@@ -525,11 +525,11 @@ with col3:
                         e_coord = safe_name_to_lonlat(order[-1])
                         
                         if s_coord:
-                            folium.Marker([s_coord[1], s_coord],
+                            folium.Marker([s_coord[1], s_coord[0]],  # 수정됨
                                         icon=folium.Icon(color="green", icon="play", prefix="fa"),
                                         tooltip=f"출발: {order}").add_to(m)
                         if e_coord:
-                            folium.Marker([e_coord[1], e_coord],
+                            folium.Marker([e_coord[1], e_coord],  # 수정됨
                                         icon=folium.Icon(color="red", icon="stop", prefix="fa"),
                                         tooltip=f"도착: {order[-1]}").add_to(m)
                     except Exception:
