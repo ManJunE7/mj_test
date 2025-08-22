@@ -15,7 +15,6 @@ import networkx as nx
 # ===================== 설정 =====================
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "YOUR_MAPBOX_TOKEN_HERE")
 
-# DRT 셰이프파일(노선) 세트
 DATA_DIR = "."
 ROUTE_FILES = {
     "DRT-1호선": os.path.join(DATA_DIR, "drt_1.shp"),
@@ -25,7 +24,7 @@ ROUTE_FILES = {
 }
 MIN_GAP_M = 10.0
 FALLBACK_OFFSET_M = 15.0
-OSMNX_DIST_M = 5000  # 실도로 폴백용 그래프 범위
+OSMNX_DIST_M = 5000  # 실도로 폴백용 그래프 반경
 
 # ===================== 유틸 =====================
 def haversine_m(lon1, lat1, lon2, lat2):
@@ -43,8 +42,8 @@ def ensure_exists(path):
 @st.cache_data
 def load_drt():
     """
-    drt_1~4의 모든 라인에서 좌표 수집 → 10m 인접 중복 제거 → 최소 2개 보장 → 정류장 생성
-    반환: (stops_gdf[name,route,lon,lat], bus_routes{노선명: gdf})
+    - 각 drt_*.shp에서 모든 LineString/MultiLineString 좌표 수집
+    - 10m 인접 중복 제거, 최소 2개 보장 → 정류장 생성
     """
     bus_routes = {}
     all_stops = []
@@ -92,9 +91,11 @@ def load_drt():
     stops_gdf = gpd.GeoDataFrame(
         stops_df, geometry=gpd.points_from_xy(stops_df.lon, stops_df.lat), crs="EPSG:4326"
     )
+    # 문자열 컬럼 정규화
+    stops_gdf["name"] = stops_gdf["name"].astype(str).str.strip()
+    stops_gdf["route"] = stops_gdf["route"].astype(str).str.strip()
     return stops_gdf, bus_routes
 
-stops_gdf, bus_routes = None, None
 try:
     stops_gdf, bus_routes = load_drt()
 except Exception as e:
@@ -105,7 +106,7 @@ if stops_gdf is None or stops_gdf.empty:
     st.error("❌ 정류장 데이터가 비어 있습니다.")
     st.stop()
 
-# ===================== 도로 그래프(폴백용) =====================
+# ===================== 도로 그래프(폴백) =====================
 @st.cache_data
 def load_graph(lat, lon, dist=OSMNX_DIST_M, net_type="drive"):
     try:
@@ -115,11 +116,6 @@ def load_graph(lat, lon, dist=OSMNX_DIST_M, net_type="drive"):
 
 # ===================== Mapbox Directions =====================
 def mapbox_route(lonlat_pairs, profile="driving"):
-    """
-    lonlat_pairs: [(lon, lat), (lon, lat), ...]
-    profile: "driving"|"walking"
-    반환: (segments[[[lon,lat],...],...], total_sec, total_meters)
-    """
     segs, sec, meters = [], 0.0, 0.0
     if len(lonlat_pairs) < 2:
         return segs, sec, meters
@@ -151,9 +147,6 @@ def mapbox_route(lonlat_pairs, profile="driving"):
 
 # ===================== OSMnx 폴백(에지 geometry 사용) =====================
 def osmnx_route(G, lonlat_pairs, speed_kmh=30.0):
-    """
-    최근접 노드 스냅 → shortest_path → 각 에지 geometry(LineString) 이어붙여 polyline
-    """
     if G is None or len(lonlat_pairs) < 2:
         return [], 0.0, 0.0
 
@@ -171,7 +164,9 @@ def osmnx_route(G, lonlat_pairs, speed_kmh=30.0):
     for i in range(len(nodes) - 1):
         try:
             path = ox.shortest_path(G, nodes[i], nodes[i + 1], weight="length")
-            # 에지 geometry 추출
+            if not path or len(path) < 2:
+                st.warning(f"OSMnx 경로 없음(구간 {i+1})")
+                continue
             geoms = ox.utils_graph.get_route_edge_attributes(G, path, "geometry")
             coords_lonlat = []
             if isinstance(geoms, list) and geoms:
@@ -180,12 +175,10 @@ def osmnx_route(G, lonlat_pairs, speed_kmh=30.0):
                         continue
                     coords_lonlat.extend(list(geom.coords))  # [(lon,lat),...]
             else:
-                # geometry가 없으면 노드 좌표(직선에 가까움)
                 coords_lonlat = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in path]
             if coords_lonlat and len(coords_lonlat) >= 2:
                 segs.append(coords_lonlat)
 
-            # 거리 합산
             lengths = ox.utils_graph.get_route_edge_attributes(G, path, "length")
             if isinstance(lengths, list):
                 total_m += sum([l for l in lengths if l is not None])
@@ -225,7 +218,7 @@ with col1:
     route_names = list(bus_routes.keys())
     selected_route = st.selectbox("노선 선택", route_names)
 
-    r_stops = stops_gdf.loc[stops_gdf["route"] == selected_route, "name"].tolist()
+    r_stops = stops_gdf.loc[stops_gdf["route"] == selected_route, "name"].astype(str).tolist()
     start = st.selectbox("출발 정류장", r_stops)
     ends = [s for s in r_stops if s != start] or r_stops
     end = st.selectbox("도착 정류장", ends)
@@ -233,60 +226,83 @@ with col1:
     mode = st.radio("이동 모드", ["운전자(도로)", "도보(보행로)"], horizontal=True)
     profile = "driving" if "운전자" in mode else "walking"
 
-    st.caption("Mapbox Directions로 실도로 경로 생성 → 실패 시 OSMnx(에지 geometry)로 폴백합니다.")
+    st.caption("Mapbox Directions로 실도로 경로 생성 → 실패 시 OSMnx(에지 geometry) 폴백.")
     generate = st.button("노선 최적화")
     clear = st.button("초기화", type="secondary")
 
 if clear:
-    for k in ["segments", "order", "duration", "distance"]:
-        st.session_state[k] = [] if k in ["segments", "order"] else 0.0
-
-# ===================== 경로 생성 로직 =====================
-def name_to_lonlat(stop_name):
-    r = stops_gdf[stops_gdf["name"] == stop_name]
-    if r.empty:
-        return None
-    return float(r.iloc[0]["lon"]), float(r.iloc["lat"])
-
-if "segments" not in st.session_state:
     st.session_state["segments"] = []
     st.session_state["order"] = []
     st.session_state["duration"] = 0.0
     st.session_state["distance"] = 0.0
+    st.success("✅ 초기화 완료")
 
+# ===================== 인덱싱 안전 함수 =====================
+def name_to_lonlat(stop_name):
+    # 단일 문자열로 강제
+    if isinstance(stop_name, (list, tuple, set)):
+        if not stop_name:
+            return None
+        stop_name = list(stop_name)[0]
+    stop_name = str(stop_name)
+
+    r = stops_gdf.loc[stops_gdf["name"].astype(str) == stop_name]
+    if r.empty:
+        st.warning(f"좌표 조회 실패: '{stop_name}'을(를) 찾을 수 없습니다.")
+        return None
+    try:
+        row = r.iloc
+    except Exception as e:
+        st.warning(f"행 인덱싱 오류: {e} (stop_name={stop_name}, index={list(r.index)[:5]})")
+        return None
+    lon = float(row["lon"])
+    lat = float(row["lat"])
+    if math.isnan(lon) or math.isnan(lat):
+        st.warning(f"좌표 NaN: '{stop_name}'")
+        return None
+    return lon, lat
+
+# 세션 기본값
+for k, v in {"segments": [], "order": [], "duration": 0.0, "distance": 0.0}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ===================== 경로 생성 =====================
 if generate:
     try:
-        s = name_to_lonlat(start)
-        e = name_to_lonlat(end)
-        coords = []
-        if s: coords.append(s)
-        if e: coords.append(e)
-        if len(coords) == 1:
-            x, y = coords
-            coords.append((x + 0.0005, y))  # 보조 목적지
-
-        # 1) Mapbox Directions(실도로, 고해상도)
-        segs, sec, meters = mapbox_route(coords, profile=profile)
-
-        # 2) 폴백: OSMnx 그래프(에지 geometry 이어붙이기)
-        if not segs:
-            avg_lat = sum([c[1] for c in coords]) / len(coords)
-            avg_lon = sum([c for c in coords]) / len(coords)
-            net_type = "drive" if profile == "driving" else "walk"
-            G = load_graph(avg_lat, avg_lon, dist=OSMNX_DIST_M, net_type=net_type)
-            spd = 30.0 if profile == "driving" else 4.5
-            segs, sec, meters = osmnx_route(G, coords, speed_kmh=spd)
-
-        if segs:
-            st.session_state["segments"] = segs
-            st.session_state["order"] = [start, end]
-            st.session_state["duration"] = sec / 60.0
-            st.session_state["distance"] = meters / 1000.0
-            st.success("✅ 실도로 기반 노선 최적화 완료")
+        if not isinstance(start, str) or not isinstance(end, str):
+            st.error("출발/도착 정류장 선택이 올바르지 않습니다. 다시 선택해 주세요.")
         else:
-            st.error("❌ 경로 생성 실패: 정류장 조합/범위·토큰을 확인해 주세요.")
+            s = name_to_lonlat(start)
+            e = name_to_lonlat(end)
+            coords = [c for c in [s, e] if c is not None]
+            if len(coords) < 2:
+                st.error("경로 생성에 필요한 좌표가 부족합니다. 출발/도착을 다시 선택하세요.")
+            else:
+                # 1) Mapbox Directions
+                segs, sec, meters = mapbox_route(coords, profile=profile)
+
+                # 2) OSMnx 폴백
+                if not segs:
+                    avg_lat = sum([c[1] for c in coords]) / len(coords)
+                    avg_lon = sum([c for c in coords]) / len(coords)
+                    net_type = "drive" if profile == "driving" else "walk"
+                    G = load_graph(avg_lat, avg_lon, dist=OSMNX_DIST_M, net_type=net_type)
+                    spd = 30.0 if profile == "driving" else 4.5
+                    segs, sec, meters = osmnx_route(G, coords, speed_kmh=spd)
+
+                if segs:
+                    st.session_state["segments"] = segs
+                    st.session_state["order"] = [start, end]
+                    st.session_state["duration"] = sec / 60.0
+                    st.session_state["distance"] = meters / 1000.0
+                    st.success("✅ 실도로 기반 노선 최적화 완료")
+                else:
+                    st.error("❌ 경로 생성 실패: 정류장 조합/범위·토큰을 확인해 주세요.")
+
     except Exception as e:
         st.error(f"❌ 경로 생성 오류: {e}")
+        st.write("디버그:", {"start": start, "end": end, "type(start)": type(start), "type(end)": type(end)})
 
 # ===================== 중: 요약 =====================
 with col2:
@@ -320,7 +336,7 @@ with col3:
             folium.PolyLine(coords, color=colors.get(selected_route, "#666"),
                             weight=3, opacity=0.35, tooltip=f"{selected_route} (원본)").add_to(m)
 
-    # 정류장(선택 노선만)
+    # 정류장(선택 노선)
     mc = MarkerCluster().add_to(m)
     for _, row in stops_gdf[stops_gdf["route"] == selected_route].iterrows():
         folium.Marker([row["lat"], row["lon"]],
@@ -328,7 +344,7 @@ with col3:
                       tooltip=row["name"],
                       icon=folium.Icon(color="blue", icon="bus", prefix="fa")).add_to(mc)
 
-    # 실도로 경로(세그먼트 → 폴리라인)
+    # 실도로 경로
     segs = st.session_state.get("segments", [])
     if segs:
         palette = ["#3f7cff", "#00b894", "#ff7675", "#fdcb6e", "#6c5ce7"]
@@ -339,7 +355,7 @@ with col3:
 
         # 출발/도착 강조
         if st.session_state.get("order"):
-            s_nm, e_nm = st.session_state["order"], st.session_state["order"][-1]
+            s_nm, e_nm = st.session_state["order"][0], st.session_state["order"][-1]
             s_row = stops_gdf[stops_gdf["name"] == s_nm].iloc
             e_row = stops_gdf[stops_gdf["name"] == e_nm].iloc
             folium.Marker([s_row["lat"], s_row["lon"]],
