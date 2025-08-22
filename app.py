@@ -31,9 +31,23 @@ def load_data():
                 route_data = gpd.read_file(f"./drt_{i}.shp").to_crs(epsg=4326)
                 bus_routes[f"DRT-{i}호선"] = route_data
                 
-                # 각 노선의 정점들을 정류장으로 추출
-                if not route_data.empty and hasattr(route_data.geometry.iloc[0], 'coords'):
-                    coords = list(route_data.geometry.iloc.coords)
+                # ✅ 수정된 geometry 접근 방식
+                if not route_data.empty and len(route_data) > 0:
+                    # 첫 번째 geometry 객체 가져오기
+                    geom = route_data.geometry.iloc[0]
+                    
+                    # LineString인지 확인하고 coords 추출
+                    if hasattr(geom, 'coords'):
+                        coords = list(geom.coords)
+                    elif hasattr(geom, 'geoms'):  # MultiLineString인 경우
+                        coords = []
+                        for line in geom.geoms:
+                            coords.extend(list(line.coords))
+                    else:
+                        st.warning(f"DRT-{i}호선: 지원하지 않는 geometry 타입입니다.")
+                        continue
+                    
+                    # 좌표에서 정류장 생성
                     for j, (lon, lat) in enumerate(coords):
                         all_stops.append({
                             'name': f"DRT-{i}호선 {j+1}번 정류장",
@@ -41,8 +55,9 @@ def load_data():
                             'lon': lon,
                             'lat': lat,
                             'stop_id': f"drt_{i}_{j+1}",
-                            'zone': f"Zone-{((j//3)+1)}"  # 3개씩 묶어서 존 생성
+                            'zone': f"Zone-{((j//3)+1)}"
                         })
+                        
             except Exception as route_error:
                 st.warning(f"DRT-{i}호선 로드 실패: {str(route_error)}")
                 continue
@@ -64,6 +79,7 @@ def load_data():
     except Exception as e:
         st.error(f"❌ 데이터 로드 실패: {str(e)}")
         return None, None
+
 
 gdf, bus_routes = load_data()
 
@@ -825,29 +841,44 @@ with col3:
             "DRT-4호선": "#fbbc04"   # 노란색
         }
         
-        for route_name, route_gdf in bus_routes.items():
-            if route_gdf.empty:
-                continue
+        # 기존 문제 코드를 찾아서 교체
+for route_name, route_gdf in bus_routes.items():
+    if route_gdf.empty:
+        continue
+        
+    show_route = False
+    if "모든 노선" in show_layers:
+        show_route = True
+    elif "선택된 노선만" in show_layers and route_name == selected_route:
+        show_route = True
+        
+    if show_route:
+        try:
+            # ✅ 수정된 geometry 접근 방식
+            if len(route_gdf) > 0:
+                geom = route_gdf.geometry.iloc[0]
                 
-            show_route = False
-            if "모든 노선" in show_layers:
-                show_route = True
-            elif "선택된 노선만" in show_layers and route_name == selected_route:
-                show_route = True
+                if hasattr(geom, 'coords'):
+                    coords = [(lat, lon) for lon, lat in geom.coords]
+                elif hasattr(geom, 'geoms'):  # MultiLineString인 경우
+                    coords = []
+                    for line in geom.geoms:
+                        coords.extend([(lat, lon) for lon, lat in line.coords])
+                else:
+                    st.warning(f"{route_name}: 지원하지 않는 geometry 타입")
+                    continue
                 
-            if show_route:
-                try:
-                    if hasattr(route_gdf.geometry.iloc[0], 'coords'):
-                        coords = [(lat, lon) for lon, lat in route_gdf.geometry.iloc.coords]
-                        folium.PolyLine(
-                            coords,
-                            color=route_colors.get(route_name, "#666666"),
-                            weight=5,
-                            opacity=0.8,
-                            tooltip=f"{route_name} 노선"
-                        ).add_to(m)
-                except Exception as e:
-                    st.warning(f"{route_name} 시각화 오류: {str(e)}")
+                folium.PolyLine(
+                    coords,
+                    color=route_colors.get(route_name, "#666666"),
+                    weight=5,
+                    opacity=0.8,
+                    tooltip=f"{route_name} 노선"
+                ).add_to(m)
+                
+        except Exception as e:
+            st.warning(f"{route_name} 시각화 오류: {str(e)}")
+
         
         # 정류장 표시
         if "정류장" in show_layers and gdf is not None and not gdf.empty:
