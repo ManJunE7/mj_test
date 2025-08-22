@@ -10,64 +10,56 @@ from shapely.geometry import Point
 from folium.plugins import MarkerCluster
 from folium.features import DivIcon
 from streamlit_folium import st_folium
+import osmnx as ox
+import networkx as nx
 
-# =============== 설정 ===============
+# ===================== 설정 =====================
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "YOUR_MAPBOX_TOKEN_HERE")
-
-DATA_DIR = "."  # drt_*.shp 파일이 위치한 폴더
+DATA_DIR = "."  # drt_*.shp가 있는 폴더
 ROUTE_FILES = {
     "DRT-1호선": os.path.join(DATA_DIR, "drt_1.shp"),
     "DRT-2호선": os.path.join(DATA_DIR, "drt_2.shp"),
     "DRT-3호선": os.path.join(DATA_DIR, "drt_3.shp"),
     "DRT-4호선": os.path.join(DATA_DIR, "drt_4.shp"),
 }
-MIN_GAP_M = 10.0           # 정류장 최소 간격(중복 제거 기준)
-FALLBACK_OFFSET_M = 15.0   # 좌표 1개일 때 보조점 추가 거리
+MIN_GAP_M = 10.0
+FALLBACK_OFFSET_M = 15.0
+OSMNX_DIST_M = 3500  # 도로 그래프 범위(중심에서 반경)
 
-# =============== 유틸 ===============
+# ===================== 유틸 =====================
 def haversine_m(lon1, lat1, lon2, lat2):
     R = 6371000.0
     dlon = math.radians(lon2 - lon1)
     dlat = math.radians(lat2 - lat1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
-    return 2*R*math.asin(math.sqrt(a)) * R / R  # 가독용 동일표기
+    return 2 * R * math.asin(math.sqrt(a))
 
 def ensure_exists(path):
     if not os.path.exists(path):
-        raise FileNotFoundError(f"파일이 없습니다: {os.path.abspath(path)}")
+        raise FileNotFoundError(f"파일 없음: {os.path.abspath(path)}")
 
-# =============== 데이터 로드 ===============
+# ===================== 데이터 로드 =====================
 @st.cache_data
 def load_drt():
-    """
-    - drt_1~4 라인셋에서 모든 좌표 수집
-    - 인접 중복 제거(10m)
-    - 최소 2개 정류장 보장(1개면 북쪽으로 15m 보조점 추가)
-    반환:
-      - stops_gdf: 정류장 포인트 GeoDataFrame [name, route, lon, lat]
-      - routes: {노선명: LineString/MultiLineString GeoDataFrame}
-    """
     bus_routes = {}
     all_stops = []
-
     for route_name, shp in ROUTE_FILES.items():
         ensure_exists(shp)
-        route_gdf = gpd.read_file(shp).to_crs(epsg=4326)
-        bus_routes[route_name] = route_gdf
+        g = gpd.read_file(shp).to_crs(epsg=4326)
+        bus_routes[route_name] = g
 
-        if route_gdf is None or route_gdf.empty:
+        if g.empty:
             continue
 
-        # 모든 지오메트리 좌표 수집
         coords_all = []
-        for geom in route_gdf.geometry.dropna():
-            if hasattr(geom, "coords"):           # LineString
+        for geom in g.geometry.dropna():
+            if hasattr(geom, "coords"):         # LineString
                 coords_all.extend(list(geom.coords))
-            elif hasattr(geom, "geoms"):          # MultiLineString
+            elif hasattr(geom, "geoms"):        # MultiLineString
                 for line in geom.geoms:
                     coords_all.extend(list(line.coords))
 
-        # 인접 중복 제거
+        # 인접 중복 제거(10m)
         filtered = []
         for (lon, lat) in coords_all:
             if not filtered:
@@ -83,7 +75,6 @@ def load_drt():
             dlat = FALLBACK_OFFSET_M / 111320.0
             filtered.append((lon, lat + dlat))
 
-        # 정류장 생성
         for j, (lon, lat) in enumerate(filtered):
             all_stops.append({
                 "name": f"{route_name} {j+1}번 정류장",
@@ -104,19 +95,91 @@ def load_drt():
 stops_gdf, bus_routes = None, None
 try:
     stops_gdf, bus_routes = load_drt()
-except FileNotFoundError as e:
-    st.error(f"❌ 데이터 로드 실패: {e}")
-    st.stop()
 except Exception as e:
     st.error(f"❌ 데이터 로드 실패: {e}")
     st.stop()
 
 if stops_gdf is None or stops_gdf.empty:
-    st.error("❌ 정류장 데이터가 비어있습니다. drt_*.shp를 확인하세요.")
+    st.error("❌ 정류장 데이터가 비어 있습니다.")
     st.stop()
 
-# =============== 페이지/스타일 ===============
-st.set_page_config(page_title="천안 DRT 기본 베이스", layout="wide", initial_sidebar_state="collapsed")
+# ===================== 도로 그래프 =====================
+@st.cache_data
+def load_graph(lat, lon, dist=OSMNX_DIST_M):
+    try:
+        # 차량/보행 공통으로 'all' 그래프 로드 후, 가중치 기준만 변경
+        return ox.graph_from_point((lat, lon), dist=dist, network_type="all")
+    except Exception as e:
+        return None
+
+# ===================== Mapbox Directions =====================
+def mapbox_route(lonlat_pairs, profile="driving"):
+    segs, sec, meters = [], 0.0, 0.0
+    if len(lonlat_pairs) < 2:
+        return segs, sec, meters
+    for i in range(len(lonlat_pairs) - 1):
+        x1, y1 = lonlat_pairs[i]
+        x2, y2 = lonlat_pairs[i + 1]
+        url = f"https://api.mapbox.com/directions/v5/mapbox/{profile}/{x1},{y1};{x2},{y2}"
+        params = {"geometries": "geojson", "overview": "full", "access_token": MAPBOX_TOKEN}
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200 and r.json().get("routes"):
+                route = r.json()["routes"][0]
+                segs.append(route["geometry"]["coordinates"])  # [[lon,lat],...]
+                sec += route.get("duration", 0.0)
+                meters += route.get("distance", 0.0)
+            else:
+                st.warning(f"Mapbox 실패(구간 {i+1}) status {r.status_code}")
+        except Exception as e:
+            st.warning(f"Mapbox 오류(구간 {i+1}): {e}")
+    return segs, sec, meters
+
+# ===================== OSMnx 폴백 경로 =====================
+def osmnx_route(G, lonlat_pairs, speed_kmh=30.0):
+    """
+    - 각 지점(경도,위도)을 도로 그래프 최근접 노드로 스냅
+    - 최단거리 경로 계산
+    - 거리/시간 추정(평균 속도 기반)
+    """
+    if G is None or len(lonlat_pairs) < 2:
+        return [], 0.0, 0.0
+
+    # 최근접 노드 스냅
+    nodes = []
+    for (lon, lat) in lonlat_pairs:
+        try:
+            nid = ox.distance.nearest_nodes(G, lon, lat)
+            nodes.append(nid)
+        except Exception:
+            # 좌표가 그래프 영역 밖이면 스킵
+            return [], 0.0, 0.0
+
+    seg_poly = []
+    total_m = 0.0
+    for i in range(len(nodes) - 1):
+        try:
+            path = ox.shortest_path(G, nodes[i], nodes[i + 1], weight="length")
+            # path 노드 좌표 → 라인
+            coords = []
+            for nid in path:
+                y = G.nodes[nid]["y"]
+                x = G.nodes[nid]["x"]
+                coords.append([x, y])  # [lon, lat]
+            seg_poly.append(coords)
+            # 거리 합산
+            length = ox.utils_graph.get_route_edge_attributes(G, path, "length")
+            total_m += sum(length) if isinstance(length, list) else float(length or 0.0)
+        except Exception as e:
+            st.warning(f"OSMnx 경로 실패(구간 {i+1}): {e}")
+
+    # 시간 추정(속도 km/h → m/s)
+    mps = speed_kmh * 1000 / 3600.0
+    total_sec = total_m / mps if mps > 0 else 0.0
+    return seg_poly, total_sec, total_m
+
+# ===================== 페이지/스타일 =====================
+st.set_page_config(page_title="천안 DRT 실도로 베이스", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
@@ -124,61 +187,41 @@ html, body, [class*="css"] { font-family:'Noto Sans KR', -apple-system, BlinkMac
 header[data-testid="stHeader"] { display:none; }
 .stApp { background:#f8f9fa; }
 .section { margin-top:10px; margin-bottom:12px; }
-.section-title { font-size:1.1rem; font-weight:700; color:#1f2937; margin-bottom:8px; }
-.map-container { width:100%!important; height:520px!important; border-radius:12px!important; border:2px solid #e5e7eb!important; overflow:hidden!important; }
+.title { font-size:1.8rem; font-weight:700; color:#202124; margin:.4rem 0 1rem 0; }
+.map-container { width:100%!important; height:560px!important; border-radius:12px!important; border:2px solid #e5e7eb!important; overflow:hidden!important; }
 div[data-testid="stIFrame"], div[data-testid="stIFrame"] > iframe,
-.folium-map, .leaflet-container { width:100%!important; height:520px!important; border:none!important; border-radius:12px!important; background:transparent!important; }
+.folium-map, .leaflet-container { width:100%!important; height:560px!important; border:none!important; border-radius:12px!important; background:transparent!important; }
 .visit { display:flex; align-items:center; gap:8px; background:#667eea; color:#fff; padding:8px 12px; border-radius:10px; margin-bottom:6px; }
 .badge { background:#fff; color:#667eea; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🚌 천안 DRT 베이스")
+st.markdown('<div class="title">🚌 천안 DRT 실도로 기반 경로 최적화</div>', unsafe_allow_html=True)
 
-col1, col2, col3 = st.columns([1.3, 1.2, 3], gap="large")
+col1, col2, col3 = st.columns([1.4, 1.1, 3], gap="large")
 
-# =============== 좌: 입력 ===============
+# ===================== 좌: 입력 =====================
 with col1:
-    st.markdown('<div class="section-title">운행 설정</div>', unsafe_allow_html=True)
-
     route_names = list(bus_routes.keys())
     selected_route = st.selectbox("노선 선택", route_names)
 
-    # 해당 노선 정류장
-    route_stops = stops_gdf.loc[stops_gdf["route"] == selected_route, "name"].tolist()
-
-    start = st.selectbox("출발 정류장", route_stops)
-    ends = [s for s in route_stops if s != start] or route_stops
+    r_stops = stops_gdf.loc[stops_gdf["route"] == selected_route, "name"].tolist()
+    start = st.selectbox("출발 정류장", r_stops)
+    ends = [s for s in r_stops if s != start] or r_stops
     end = st.selectbox("도착 정류장", ends)
 
-    mode = st.radio("이동 모드", ["운전자", "도보"], horizontal=True)
-    profile = "driving" if mode == "운전자" else "walking"
+    mode = st.radio("이동 모드", ["운전자(도로)", "도보(보행로 우선)"], horizontal=True)
+    profile = "driving" if "운전자" in mode else "walking"
 
+    st.caption("우선 Mapbox Directions로 실도로 경로를 계산하고, 실패할 경우 OSMnx 그래프 최단경로로 폴백합니다.")
     generate = st.button("노선 최적화")
 
-# =============== 경로 생성 ===============
+# ===================== 경로 생성 =====================
 def name_to_lonlat(stop_name):
     r = stops_gdf[stops_gdf["name"] == stop_name]
     if r.empty:
         return None
     return float(r.iloc[0]["lon"]), float(r.iloc["lat"])
-
-def mapbox_route(lonlat_pairs, profile="driving"):
-    segs, sec, meters = [], 0.0, 0.0
-    for i in range(len(lonlat_pairs) - 1):
-        x1, y1 = lonlat_pairs[i]
-        x2, y2 = lonlat_pairs[i + 1]
-        url = f"https://api.mapbox.com/directions/v5/mapbox/{profile}/{x1},{y1};{x2},{y2}"
-        params = {"geometries": "geojson", "overview": "full", "access_token": MAPBOX_TOKEN}
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200 and r.json().get("routes"):
-            rt = r.json()["routes"][0]
-            segs.append(rt["geometry"]["coordinates"])
-            sec += rt.get("duration", 0.0)
-            meters += rt.get("distance", 0.0)
-        else:
-            st.warning(f"경로 호출 실패(구간 {i+1}) - status {r.status_code}")
-    return segs, sec, meters
 
 if "segments" not in st.session_state:
     st.session_state["segments"] = []
@@ -194,36 +237,46 @@ if generate:
         if s: coords.append(s)
         if e: coords.append(e)
         if len(coords) == 1:
-            x, y = coords[0]
+            x, y = coords
             coords.append((x + 0.0005, y))  # 보조 목적지
 
-        segs, sec, m = mapbox_route(coords, profile)
+        # 1) Mapbox 실도로 경로
+        segs, sec, meters = mapbox_route(coords, profile=profile)
+
+        # 2) 폴백: OSMnx 도로 그래프 최단경로
+        if not segs:
+            # 그래프 중심: 두 지점 평균
+            avg_lat = sum([c[1] for c in coords]) / len(coords)
+            avg_lon = sum([c for c in coords]) / len(coords)
+            G = load_graph(avg_lat, avg_lon, dist=OSMNX_DIST_M)
+            # 속도: 운전자 30km/h, 도보 4.5km/h
+            spd = 30.0 if profile == "driving" else 4.5
+            segs, sec, meters = osmnx_route(G, coords, speed_kmh=spd)
+
         if segs:
             st.session_state["segments"] = segs
             st.session_state["order"] = [start, end]
             st.session_state["duration"] = sec / 60.0
-            st.session_state["distance"] = m / 1000.0
-            st.success("✅ 노선 최적화가 완료되었습니다!")
+            st.session_state["distance"] = meters / 1000.0
+            st.success("✅ 실도로 기반 노선 최적화 완료")
         else:
-            st.error("❌ 경로를 생성하지 못했습니다. 정류장을 바꿔 시도해 보세요.")
+            st.error("❌ 경로를 생성하지 못했습니다. 정류장 조합 또는 범위를 확인하세요.")
     except Exception as e:
         st.error(f"❌ 경로 생성 오류: {e}")
 
-# =============== 중: 요약 ===============
+# ===================== 중: 요약 =====================
 with col2:
-    st.markdown('<div class="section-title">운행 순서</div>', unsafe_allow_html=True)
+    st.markdown("**운행 순서**")
     if st.session_state.get("order"):
         for i, nm in enumerate(st.session_state["order"], 1):
             st.markdown(f'<div class="visit"><div class="badge">{i}</div><div>{nm}</div></div>', unsafe_allow_html=True)
     else:
         st.info("경로를 생성하면 순서가 표시됩니다.")
-
     st.metric("⏱️ 예상 소요시간", f"{st.session_state.get('duration', 0.0):.1f}분")
     st.metric("📏 예상 이동거리", f"{st.session_state.get('distance', 0.0):.2f}km")
 
-# =============== 우: 지도 ===============
+# ===================== 우: 지도 =====================
 with col3:
-    st.markdown('<div class="section-title">지도</div>', unsafe_allow_html=True)
     try:
         clat, clon = float(stops_gdf["lat"].mean()), float(stops_gdf["lon"].mean())
     except Exception:
@@ -232,7 +285,7 @@ with col3:
     m = folium.Map(location=[clat, clon], zoom_start=13, tiles="CartoDB Positron",
                    prefer_canvas=True, control_scale=True)
 
-    # 노선 라인(선택 노선만 표시)
+    # 선택 노선 라인
     colors = {"DRT-1호선":"#4285f4","DRT-2호선":"#ea4335","DRT-3호선":"#34a853","DRT-4호선":"#fbbc04"}
     g = bus_routes.get(selected_route)
     if g is not None and not g.empty:
@@ -245,9 +298,9 @@ with col3:
                     coords.extend([(y, x) for x, y in line.coords])
         if coords:
             folium.PolyLine(coords, color=colors.get(selected_route, "#666"),
-                            weight=5, opacity=0.8, tooltip=f"{selected_route}").add_to(m)
+                            weight=5, opacity=0.6, tooltip=f"{selected_route} (원본)").add_to(m)
 
-    # 정류장 마커(선택 노선만)
+    # 정류장(선택 노선만)
     mc = MarkerCluster().add_to(m)
     for _, row in stops_gdf[stops_gdf["route"] == selected_route].iterrows():
         folium.Marker([row["lat"], row["lon"]],
@@ -255,21 +308,26 @@ with col3:
                       tooltip=row["name"],
                       icon=folium.Icon(color="blue", icon="bus", prefix="fa")).add_to(mc)
 
-    # 생성된 경로
+    # 실도로 경로(세그먼트 → 라인)
     segs = st.session_state.get("segments", [])
     if segs:
-        palette = ["#4285f4", "#34a853", "#ea4335", "#fbbc04"]
+        palette = ["#ff5722", "#009688", "#3f51b5", "#9c27b0", "#795548"]
         for i, seg in enumerate(segs):
             latlon = [(p[1], p) for p in seg]
             folium.PolyLine(latlon, color=palette[i % len(palette)],
-                            weight=6, opacity=0.9, tooltip=f"경로 {i+1}").add_to(m)
-        mid = segs[len(segs)//2]
-        folium.map.Marker([mid[1], mid],
-                          icon=DivIcon(html="<div style='background:#4285f4;color:#fff;border-radius:50%;"
-                                            "width:28px;height:28px;line-height:28px;text-align:center;"
-                                            "font-weight:700;'>1</div>")
-                          ).add_to(m)
+                            weight=7, opacity=0.85, tooltip=f"실도로 경로 {i+1}").add_to(m)
+        # 시작/끝 강조
+        if st.session_state.get("order"):
+            s_nm, e_nm = st.session_state["order"], st.session_state["order"][-1]
+            s_row = stops_gdf[stops_gdf["name"] == s_nm].iloc
+            e_row = stops_gdf[stops_gdf["name"] == e_nm].iloc
+            folium.Marker([s_row["lat"], s_row["lon"]],
+                          icon=folium.Icon(color="green", icon="play", prefix="fa"),
+                          tooltip=f"출발: {s_nm}").add_to(m)
+            folium.Marker([e_row["lat"], e_row["lon"]],
+                          icon=folium.Icon(color="red", icon="stop", prefix="fa"),
+                          tooltip=f"도착: {e_nm}").add_to(m)
 
     st.markdown('<div class="map-container">', unsafe_allow_html=True)
-    st_folium(m, width="100%", height=520, returned_objects=[], use_container_width=True, key="drt_base_map")
+    st_folium(m, width="100%", height=560, returned_objects=[], use_container_width=True, key="drt_road_map")
     st.markdown('</div>', unsafe_allow_html=True)
