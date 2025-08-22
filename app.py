@@ -13,7 +13,7 @@ import osmnx as ox
 import networkx as nx
 
 # ===================== 설정 =====================
-MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "pk.eyJ1Ijoia2lteWVvbmp1biIsImEiOiJjbWRiZWw2NTEwNndtMmtzNHhocmNiMHllIn0.r7R2ConWouvP-Bmsppuvzw")
+MAPBOX_TOKEN = pk.eyJ1IjoiZ3VyMDUxMDgiLCJhIjoiY21lZ2k1Y291MTdoZjJrb2k3bHc3cTJrbSJ9.DElgSQ0rPoRk1eEacPI8uQ
 
 DATA_DIR = "."
 ROUTE_FILES = {
