@@ -9,7 +9,6 @@ import osmnx as ox
 import requests
 from streamlit_folium import st_folium
 import math
-import os
 
 # ──────────────────────────────
 # ✅ 환경변수 (데모용 토큰 - 실제 서비스는 환경변수로 관리)
@@ -122,13 +121,14 @@ for k, v in DEFAULTS.items():
         st.session_state[k] = v
 
 # ──────────────────────────────
-# ✅ 페이지 설정 & 스타일 (문제 empty 셀렉터 제거)
+# ✅ 페이지 설정 & 스타일
 # ──────────────────────────────
 st.set_page_config(
     page_title="천안 DRT 스마트 노선 최적화 시스템",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
@@ -139,7 +139,6 @@ header[data-testid="stHeader"] { display: none; }
 
 /* 헤더 */
 .header-container { display:flex; align-items:center; justify-content:center; gap:20px; margin-bottom:2rem; padding:1rem 0; }
-.logo-image { width:80px; height:80px; object-fit:contain; }
 .main-title { font-size:2.8rem; font-weight:700; color:#202124; letter-spacing:-1px; margin:0; }
 .title-underline { width:100%; height:3px; background: linear-gradient(90deg,#4285f4,#34a853); margin:0 auto 2rem auto; border-radius:2px; }
 
@@ -150,19 +149,16 @@ header[data-testid="stHeader"] { display: none; }
 .stButton > button { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; border:none; border-radius:10px; padding:12px 20px; font-size:0.9rem; font-weight:600; width:100%; height:48px; transition:all .3s; box-shadow:0 4px 8px rgba(102,126,234,.3); }
 .stButton > button:hover { transform: translateY(-2px); box-shadow:0 6px 16px rgba(102,126,234,.4); }
 
-/* 방문 순서 */
-.visit-order-item { display:flex; align-items:center; padding:12px 16px; background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; border-radius:12px; margin-bottom:8px; font-size:.95rem; font-weight:500; transition:all .2s; box-shadow:0 2px 4px rgba(102,126,234,.3); }
-.visit-order-item:hover { transform:translateX(4px); box-shadow:0 4px 8px rgba(102,126,234,.4); }
-.visit-number { background:rgba(255,255,255,.9); color:#667eea; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; margin-right:12px; flex-shrink:0; }
+/* 방문 순서 카드 */
+.visit-order-item { display:flex; align-items:center; padding:12px 16px; background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; border-radius:12px; margin-bottom:8px; font-size:.95rem; font-weight:500; box-shadow:0 2px 4px rgba(102,126,234,.3); }
+.visit-number { background:rgba(255,255,255,.9); color:#667eea; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; margin-right:12px; }
 
-/* 차량 상태 */
-.vehicle-status-item { display:flex; align-items:center; padding:10px 14px; background:linear-gradient(135deg,#ff9a9e 0%,#fecfef 100%); color:#444; border-radius:10px; margin-bottom:6px; font-size:.9rem; font-weight:500; transition:all .2s; box-shadow:0 2px 4px rgba(255,154,158,.3); }
-.vehicle-status-item:hover { transform:translateX(3px); box-shadow:0 4px 8px rgba(255,154,158,.4); }
-.vehicle-number { background:rgba(255,255,255,.9); color:#ff6b6b; width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.75rem; font-weight:700; margin-right:10px; flex-shrink:0; }
+/* 차량 상태 카드 */
+.vehicle-status-item { display:flex; align-items:center; padding:10px 14px; background:linear-gradient(135deg,#ff9a9e 0%,#fecfef 100%); color:#444; border-radius:10px; margin-bottom:6px; font-size:.9rem; font-weight:500; box-shadow:0 2px 4px rgba(255,154,158,.3); }
+.vehicle-number { background:rgba(255,255,255,.9); color:#ff6b6b; width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.75rem; font-weight:700; margin-right:10px; }
 
 /* 메트릭 카드 */
-.stMetric { background: linear-gradient(135deg,#a8edea 0%,#fed6e3 100%); border:none; border-radius:12px; padding:16px 10px; text-align:center; transition:all .2s; box-shadow:0 2px 4px rgba(168,237,234,.3); }
-.stMetric:hover { transform:translateY(-2px); box-shadow:0 4px 8px rgba(168,237,234,.4); }
+.stMetric { background: linear-gradient(135deg,#a8edea 0%,#fed6e3 100%); border:none; border-radius:12px; padding:16px 10px; text-align:center; box-shadow:0 2px 4px rgba(168,237,234,.3); }
 
 /* 빈 상태 */
 .empty-state { text-align:center; padding:40px 20px; color:#9ca3af; font-style:italic; font-size:.95rem; background: linear-gradient(135deg,#ffecd2 0%,#fcb69f 100%); border-radius:12px; margin:16px 0; }
@@ -180,17 +176,15 @@ div[data-testid="stIFrame"] > iframe { width:100%!important; height:100%!importa
 .stTextInput > div > div > input,
 .stSelectbox > div > div > select,
 .stMultiSelect > div > div > div > div {
-  border:2px solid #e5e7eb; border-radius:8px; padding:10px 14px; font-size:.9rem; transition:all .2s; background:#fafafa;
+  border:2px solid #e5e7eb; border-radius:8px; padding:10px 14px; font-size:.9rem; background:#fafafa;
 }
 .stTextInput > div > div > input:focus,
 .stSelectbox > div > div > select:focus {
   border-color:#667eea; background:#fff; box-shadow:0 0 0 3px rgba(102,126,234,.1);
 }
 
-/* 통계/분석 카드 */
-.drt-route-card { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; padding:1rem; border-radius:10px; margin:.5rem 0; box-shadow:0 4px 8px rgba(102,126,234,.3); }
-.performance-metric { background:linear-gradient(135deg,#a8edea 0%,#fed6e3 100%); padding:.8rem; border-radius:8px; text-align:center; margin:.3rem 0; font-weight:600; color:#2d3748; }
-.time-slot-card { background:linear-gradient(135deg,#ffecd2 0%,#fcb69f 100%); padding:.6rem; border-radius:6px; margin:.2rem 0; font-size:.9rem; color:#744210; }
+/* 가시성 보강 */
+.stSelectbox label, .stRadio label, .stSlider label { color:#111 !important; opacity:1 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -217,35 +211,46 @@ with col1:
     st.markdown('<div class="section-header">🚌 DRT 운행 설정</div>', unsafe_allow_html=True)
 
     st.markdown("**운행 시간대**")
-    time_slot = st.selectbox("", ["오전 첫차 (06:00-09:00)", "오전 (09:00-12:00)", "오후 (12:00-18:00)", "저녁 (18:00-21:00)"],
-                             key="time_slot_key", label_visibility="collapsed")
+    time_slot = st.selectbox(
+        "",
+        ["오전 첫차 (06:00-09:00)", "오전 (09:00-12:00)", "오후 (12:00-18:00)", "저녁 (18:00-21:00)"],
+        key="time_slot_key", label_visibility="collapsed"
+    )
 
     st.markdown("**운행 노선**")
     route_names = list(bus_routes.keys()) if bus_routes else ["DRT-1호선"]
     selected_route = st.selectbox("", route_names, key="route_key", label_visibility="collapsed")
     st.session_state["selected_route"] = selected_route
 
+    # 해당 노선의 정류장 필터링(정규화 + 방어적 처리)
     if gdf is not None and not gdf.empty:
-        route_stops = gdf[gdf["route"] == selected_route]["name"].tolist()
+        route_col = "route"
+        name_col = "name"
+        if route_col not in gdf.columns or name_col not in gdf.columns:
+            st.error("정류장 데이터의 컬럼명이 예상과 다릅니다. 'route', 'name' 컬럼이 필요합니다.")
+            route_stops = []
+        else:
+            gdf["_route_norm"] = gdf[route_col].astype(str).str.strip()
+            sel_norm = str(selected_route).strip()
+            route_stops = (
+                gdf.loc[gdf["_route_norm"] == sel_norm, name_col]
+                  .astype(str).str.strip().tolist()
+            )
     else:
-        route_stops = ["정류장 정보 없음"]
+        route_stops = []
 
-    if route_stops and route_stops[0] != "정류장 정보 없음":
+    if route_stops:
         st.markdown("**출발 정류장**")
         start = st.selectbox("", route_stops, key="start_key", label_visibility="collapsed")
 
-       st.markdown("**도착 정류장**")
-# 1) 정류장이 2개 이상이면 서로 다른 정류장 강제
-if len(route_stops) >= 2:
-    available_ends = [s for s in route_stops if s != start]
-    if not available_ends:
-        # 이론상 거의 없지만, 방어적으로 전체에서 첫 항목을 선택
-        available_ends = route_stops
-    end = st.selectbox("", available_ends, key="end_key", label_visibility="collapsed")
-else:
-    # 2) 정류장이 1개뿐이면 출발=도착 동일 허용
-    end = st.selectbox("", route_stops, key="end_key", label_visibility="collapsed")
-
+        st.markdown("**도착 정류장**")
+        if len(route_stops) >= 2:
+            available_ends = [s for s in route_stops if s != start]
+            if not available_ends:
+                available_ends = route_stops
+            end = st.selectbox("", available_ends, key="end_key", label_visibility="collapsed")
+        else:
+            end = st.selectbox("", route_stops, key="end_key", label_visibility="collapsed")
 
         st.markdown("**승차 시간**")
         pickup_time = st.time_input("", value=pd.to_datetime("07:30").time(), key="time_key", label_visibility="collapsed")
@@ -322,7 +327,6 @@ with col2:
         st.metric("📏 예상 이동거리", f"{st.session_state.get('distance', 0.0):.2f}km")
     else:
         st.markdown('<div class="empty-state">노선 최적화 후 표시됩니다<br>🚌</div>', unsafe_allow_html=True)
-        # 기본 메트릭도 보여주기
         st.metric("⏱️ 예상 소요시간", f"{st.session_state.get('duration', 0.0):.1f}분")
         st.metric("📏 예상 이동거리", f"{st.session_state.get('distance', 0.0):.2f}km")
 
