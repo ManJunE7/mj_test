@@ -9,6 +9,7 @@ import osmnx as ox
 import requests
 from streamlit_folium import st_folium
 import math
+import time
 
 # =========================
 # 환경 변수 (데모 토큰)
@@ -32,9 +33,9 @@ def haversine_m(lon1, lat1, lon2, lat2):
 @st.cache_data
 def load_data(min_gap_m=10.0, min_second_point_offset_m=15.0):
     """
-    - 각 노선의 모든 지오메트리(LineString/MultiLineString)를 순회하여 전체 좌표 수집
-    - 인접 중복 제거(기본 10m)
-    - 정류장 최소 2개 보장(1개면 15m 북쪽으로 보조 점 추가)
+    - 각 노선의 모든 지오메트리(LineString/MultiLineString) 순회
+    - 인접 중복 제거(10m)
+    - 최소 2개 정류장 보장(1개면 15m offset 추가)
     """
     try:
         bus_routes = {}
@@ -48,7 +49,6 @@ def load_data(min_gap_m=10.0, min_second_point_offset_m=15.0):
                 if route_data is None or route_data.empty:
                     continue
 
-                # 1) 모든 지오메트리의 좌표 수집
                 coords_all = []
                 for geom in route_data.geometry.dropna():
                     if hasattr(geom, "coords"):
@@ -57,7 +57,6 @@ def load_data(min_gap_m=10.0, min_second_point_offset_m=15.0):
                         for line in geom.geoms:
                             coords_all.extend(list(line.coords))
 
-                # 2) 인접 중복 제거 (선형 스캔)
                 filtered = []
                 for pt in coords_all:
                     lon, lat = pt
@@ -68,13 +67,11 @@ def load_data(min_gap_m=10.0, min_second_point_offset_m=15.0):
                         if haversine_m(prev_lon, prev_lat, lon, lat) > min_gap_m:
                             filtered.append((lon, lat))
 
-                # 3) 최소 2개 보장
                 if len(filtered) == 1:
                     lon, lat = filtered[0]
-                    dlat = min_second_point_offset_m / 111320.0  # 약 위도 1도 = 111.32km
+                    dlat = min_second_point_offset_m / 111320.0
                     filtered.append((lon, lat + dlat))
 
-                # 4) 정류장 생성
                 for j, (lon, lat) in enumerate(filtered):
                     all_stops.append({
                         "name": f"DRT-{i}호선 {j+1}번 정류장",
@@ -96,7 +93,6 @@ def load_data(min_gap_m=10.0, min_second_point_offset_m=15.0):
                 geometry=gpd.points_from_xy(stops_df.lon, stops_df.lat),
                 crs="EPSG:4326"
             )
-            # 좌표 컬럼 보강
             stops_gdf["lon"], stops_gdf["lat"] = stops_gdf.geometry.x, stops_gdf.geometry.y
         else:
             stops_gdf = None
@@ -147,11 +143,14 @@ DEFAULTS = {
     "pickup_success_rate": 94.3,
     "vehicle_utilization": 78.2,
     "cost_efficiency": 1.25,
+    # 지도에 보이는 가상 차량(시뮬레이션에서 살짝 이동)
     "active_vehicles": [
         {"id": "DRT-01", "status": "운행중", "passengers": 6, "lat": 36.8151, "lon": 127.1139},
         {"id": "DRT-02", "status": "대기중", "passengers": 0, "lat": 36.8161, "lon": 127.1149},
         {"id": "DRT-03", "status": "운행중", "passengers": 3, "lat": 36.8141, "lon": 127.1129},
-    ]
+    ],
+    # 시뮬레이션 진행률
+    "sim_progress": 0
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -190,10 +189,8 @@ header[data-testid="stHeader"] { display: none; }
 .empty-state { text-align:center; padding:40px 20px; color:#9ca3af; font-style:italic; font-size:.95rem; background: linear-gradient(135deg,#ffecd2 0%,#fcb69f 100%); border-radius:12px; margin:16px 0; }
 
 .map-container { width:100%!important; height:520px!important; border-radius:12px!important; overflow:hidden!important; position:relative!important; background:transparent!important; border:2px solid #e5e7eb!important; margin:0!important; padding:0!important; box-sizing:border-box!important; }
-div[data-testid="stIFrame"] { width:100%!important; height:520px!important; position:relative!important; overflow:hidden!important; border-radius:12px!important; background:transparent!important; border:none!important; margin:0!important; padding:0!important; }
-div[data-testid="stIFrame"] > iframe { width:100%!important; height:100%!important; border:none!important; border-radius:12px!important; background:transparent!important; margin:0!important; padding:0!important; }
-
-.folium-map, .leaflet-container { width:100%!important; height:100%!important; max-width:100%!important; max-height:520px!important; background:transparent!important; margin:0!important; padding:0!important; border:none!important; }
+div[data-testid="stIFrame"], div[data-testid="stIFrame"] > iframe,
+.folium-map, .leaflet-container { width:100%!important; height:520px!important; border:none!important; border-radius:12px!important; background:transparent!important; }
 
 .stTextInput > div > div > input,
 .stSelectbox > div > div > select,
@@ -204,7 +201,6 @@ div[data-testid="stIFrame"] > iframe { width:100%!important; height:100%!importa
 .stSelectbox > div > div > select:focus {
   border-color:#667eea; background:#fff; box-shadow:0 0 0 3px rgba(102,126,234,.1);
 }
-
 .stSelectbox label, .stRadio label, .stSlider label { color:#111 !important; opacity:1 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -237,11 +233,11 @@ with col1:
     selected_route = st.selectbox("", route_names, key="route_key", label_visibility="collapsed")
     st.session_state["selected_route"] = selected_route
 
-    # 정류장 목록 생성 (정규화 + 방어)
+    # 정류장 목록
     if gdf is not None and not gdf.empty:
         route_col, name_col = "route", "name"
         if route_col not in gdf.columns or name_col not in gdf.columns:
-            st.error("정류장 데이터의 컬럼명이 예상과 다릅니다. 'route', 'name' 필요")
+            st.error("정류장 데이터 컬럼명이 예상과 다릅니다. 'route', 'name' 필요")
             route_stops = []
         else:
             gdf["_route_norm"] = gdf[route_col].astype(str).str.strip()
@@ -264,7 +260,6 @@ with col1:
                 available_ends = route_stops
             end = st.selectbox("", available_ends, key="end_key", label_visibility="collapsed")
         else:
-            # 정류장 1개 노선도 허용
             end = st.selectbox("", route_stops, key="end_key", label_visibility="collapsed")
 
         st.markdown("**승차 시간**")
@@ -306,6 +301,7 @@ if clear_clicked:
         for k in ["duration", "distance"]:
             st.session_state[k] = 0.0
         st.session_state["auto_gpt_input"] = ""
+        st.session_state["sim_progress"] = 0
         for widget_key in ["time_slot_key", "route_key", "start_key", "end_key", "time_key"]:
             if widget_key in st.session_state:
                 del st.session_state[widget_key]
@@ -338,7 +334,6 @@ with col2:
                 <div>{name}</div>
             </div>
             """, unsafe_allow_html=True)
-        st.markdown("**운행 통계:**")
     else:
         st.markdown('<div class="empty-state">노선 최적화 후 표시됩니다<br>🚌</div>', unsafe_allow_html=True)
 
@@ -419,10 +414,10 @@ with col3:
         except Exception:
             pass
 
-        # 폴백: 스냅 1개면 보조 목적지 생성(최소 2개 보장)
+        # 폴백: 스냅 1개면 보조 목적지 생성
         if 'snapped' in locals() and len(snapped) == 1:
             x, y = snapped[0]
-            snapped.append((x + 0.0005, y))  # 경도 0.0005 ≈ 수십 m
+            snapped.append((x + 0.0005, y))  # 수십 m
 
     # 경로 생성(Mapbox)
     if 'snapped' in locals() and optimize_clicked and len(snapped) >= 2:
@@ -559,12 +554,32 @@ with col3:
                 [clat - 0.005, clon + 0.005, 0.7],
             ], radius=15, blur=10, max_zoom=1).add_to(m)
 
-        # 시뮬레이션
+        # --- 경량 시뮬레이션(프로그레스 + KPI 점진 업데이트 + 차량 미세 이동) ---
         if simulate_clicked:
             st.info("🎮 DRT 운행 시뮬레이션이 시작되었습니다!")
-            st.session_state["avg_wait_time"] = 7.2
-            st.session_state["pickup_success_rate"] = 96.1
-            st.session_state["vehicle_utilization"] = 82.5
+            progress = st.progress(0, text="시뮬레이션 준비 중...")
+            steps = 100
+            # 가상 차량 이동 벡터(아주 작게)
+            move_vectors = [(+0.00002, +0.00003), (-0.00001, +0.00002), (+0.00003, -0.00001)]
+
+            for t in range(1, steps + 1):
+                # KPI를 점진적으로 변경(예시 곡선)
+                st.session_state["avg_wait_time"] = max(6.8, 9.8 - 0.03 * t)          # 9.8→~6.8
+                st.session_state["pickup_success_rate"] = min(97.0, 90.0 + 0.07 * t)  # 90→~97
+                st.session_state["vehicle_utilization"] = min(85.0, 75.0 + 0.10 * t)  # 75→~85
+
+                # 차량 좌표를 소폭 이동(지도가 매 프레임 다시 그려지진 않지만, 다음 rerun 시 반영)
+                for idx, v in enumerate(st.session_state["active_vehicles"]):
+                    dv_lon, dv_lat = move_vectors[idx % len(move_vectors)]
+                    v["lon"] += dv_lon
+                    v["lat"] += dv_lat
+
+                st.session_state["sim_progress"] = t
+                progress.progress(t, text=f"시뮬레이션 실행 중... {t}%")
+                time.sleep(0.03)
+
+            progress.empty()
+            st.success("✅ 시뮬레이션 완료")
 
         # 지도 출력
         st.markdown('<div class="map-container">', unsafe_allow_html=True)
@@ -593,11 +608,11 @@ with c4:
 st.markdown("### 🎯 실시간 운행 효율성 분석")
 a1, a2 = st.columns(2)
 with a1:
-    st.markdown("""
-    **🟢 운행 성과:**
-    - 평균 대기시간: 8.5분 (목표: 10분 이하)
-    - 픽업 성공률: 94.3% (목표: 90% 이상)
-    - 차량 가동률: 78.2% (목표: 75% 이상)
+    st.markdown(f"""
+    **🟢 운행 성과(진행률 {st.session_state.get('sim_progress', 0)}%):**
+    - 평균 대기시간: {st.session_state.get('avg_wait_time', 8.5):.1f}분
+    - 픽업 성공률: {st.session_state.get('pickup_success_rate', 94.3):.1f}%
+    - 차량 가동률: {st.session_state.get('vehicle_utilization', 78.2):.1f}%
     """)
 with a2:
     st.markdown("""
