@@ -80,7 +80,6 @@ def load_data():
         st.error(f"❌ 데이터 로드 실패: {str(e)}")
         return None, None
 
-
 gdf, bus_routes = load_data()
 
 # 데이터 로드 실패 시 앱 중단
@@ -774,7 +773,7 @@ with col3:
                         st.warning(f"⚠️ '{nm}' 좌표를 가져올 수 없습니다: {str(coord_error)}")
 
     # 경로 생성 처리 (Mapbox API 사용)
-    if optimize_clicked and len(snapped) >= 2:
+    if optimize_clicked and 'snapped' in locals() and len(snapped) >= 2:
         try:
             segs, td, tl = [], 0.0, 0.0
             api_mode = "driving"  # DRT는 차량 운행
@@ -823,7 +822,7 @@ with col3:
             st.error(f"❌ 경로 생성 중 오류 발생: {str(e)}")
             st.info("💡 다른 출발지나 도착지를 선택해보세요.")
 
-    # 🔧 지도 렌더링 - 빈 박스 제거 최적화
+    # 🔧 지도 렌더링 - 완전 수정된 구조
     try:
         m = folium.Map(
             location=[clat, clon], 
@@ -841,44 +840,41 @@ with col3:
             "DRT-4호선": "#fbbc04"   # 노란색
         }
         
-        # 기존 문제 코드를 찾아서 교체
-for route_name, route_gdf in bus_routes.items():
-    if route_gdf.empty:
-        continue
-        
-    show_route = False
-    if "모든 노선" in show_layers:
-        show_route = True
-    elif "선택된 노선만" in show_layers and route_name == selected_route:
-        show_route = True
-        
-    if show_route:
-        try:
-            # ✅ 수정된 geometry 접근 방식
-            if len(route_gdf) > 0:
-                geom = route_gdf.geometry.iloc[0]
+        # ✅ 올바른 노선 표시 로직
+        for route_name, route_gdf in bus_routes.items():
+            if route_gdf.empty:
+                continue
                 
-                if hasattr(geom, 'coords'):
-                    coords = [(lat, lon) for lon, lat in geom.coords]
-                elif hasattr(geom, 'geoms'):  # MultiLineString인 경우
-                    coords = []
-                    for line in geom.geoms:
-                        coords.extend([(lat, lon) for lon, lat in line.coords])
-                else:
-                    st.warning(f"{route_name}: 지원하지 않는 geometry 타입")
-                    continue
+            show_route = False
+            if "모든 노선" in show_layers:
+                show_route = True
+            elif "선택된 노선만" in show_layers and route_name == selected_route:
+                show_route = True
                 
-                folium.PolyLine(
-                    coords,
-                    color=route_colors.get(route_name, "#666666"),
-                    weight=5,
-                    opacity=0.8,
-                    tooltip=f"{route_name} 노선"
-                ).add_to(m)
-                
-        except Exception as e:
-            st.warning(f"{route_name} 시각화 오류: {str(e)}")
-
+            if show_route:
+                try:
+                    if len(route_gdf) > 0:
+                        geom = route_gdf.geometry.iloc[0]
+                        
+                        if hasattr(geom, 'coords'):
+                            coords = [(lat, lon) for lon, lat in geom.coords]
+                        elif hasattr(geom, 'geoms'):  # MultiLineString인 경우
+                            coords = []
+                            for line in geom.geoms:
+                                coords.extend([(lat, lon) for lon, lat in line.coords])
+                        else:
+                            continue
+                        
+                        folium.PolyLine(
+                            coords,
+                            color=route_colors.get(route_name, "#666666"),
+                            weight=5,
+                            opacity=0.8,
+                            tooltip=f"{route_name} 노선"
+                        ).add_to(m)
+                        
+                except Exception as e:
+                    st.warning(f"{route_name} 시각화 오류: {str(e)}")
         
         # 정류장 표시
         if "정류장" in show_layers and gdf is not None and not gdf.empty:
@@ -934,7 +930,7 @@ for route_name, route_gdf in bus_routes.items():
             
             for i, seg in enumerate(segments):
                 if seg:
-                    folium.PolyLine([(pt[1], pt[0]) for pt in seg], 
+                    folium.PolyLine([(pt[1], pt) for pt in seg], 
                                   color=palette[i % len(palette)], 
                                   weight=6, 
                                   opacity=0.8,
@@ -942,12 +938,12 @@ for route_name, route_gdf in bus_routes.items():
                     ).add_to(m)
                     
                     mid = seg[len(seg) // 2]
-                    candidate_pos = [mid[1], mid[0]]
+                    candidate_pos = [mid[1], mid]
                     
-                    while any(abs(candidate_pos - used) < min_distance and 
+                    while any(abs(candidate_pos[0] - used) < min_distance and 
                             abs(candidate_pos[1] - used[1]) < min_distance 
                             for used in used_positions):
-                        candidate_pos += min_distance * 0.5
+                        candidate_pos[0] += min_distance * 0.5
                         candidate_pos[1] += min_distance * 0.5
                     
                     folium.map.Marker(candidate_pos,
