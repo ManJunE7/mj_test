@@ -234,9 +234,18 @@ with col1:
         st.markdown("**출발 정류장**")
         start = st.selectbox("", route_stops, key="start_key", label_visibility="collapsed")
 
-        st.markdown("**도착 정류장**")
-        available_ends = [s for s in route_stops if s != start]
-        end = st.selectbox("", available_ends, key="end_key", label_visibility="collapsed") if available_ends else start
+       st.markdown("**도착 정류장**")
+# 1) 정류장이 2개 이상이면 서로 다른 정류장 강제
+if len(route_stops) >= 2:
+    available_ends = [s for s in route_stops if s != start]
+    if not available_ends:
+        # 이론상 거의 없지만, 방어적으로 전체에서 첫 항목을 선택
+        available_ends = route_stops
+    end = st.selectbox("", available_ends, key="end_key", label_visibility="collapsed")
+else:
+    # 2) 정류장이 1개뿐이면 출발=도착 동일 허용
+    end = st.selectbox("", route_stops, key="end_key", label_visibility="collapsed")
+
 
         st.markdown("**승차 시간**")
         pickup_time = st.time_input("", value=pd.to_datetime("07:30").time(), key="time_key", label_visibility="collapsed")
